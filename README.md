@@ -12,7 +12,7 @@ The model is designed to work with the **nuScenes** dataset.
 
 1.  **Clone the Repository**
     ```bash
-    git clone <your-repo-url>
+    git clone https://github.com/xiaotwu/bevformerpp.git
     cd bevformerpp
     ```
 
