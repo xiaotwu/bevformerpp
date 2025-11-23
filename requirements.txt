@@ -1,0 +1,9 @@
+torch
+numpy
+matplotlib
+opencv-python
+timm
+einops
+pyquaternion
+nuscenes-devkit
+jupyterlab
