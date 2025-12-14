@@ -15,8 +15,8 @@ A modular Bird's-Eye View (BEV) perception system that integrates multi-view cam
 
 - **OS**: Windows / Linux / macOS
 - **Python**: >= 3.10
-- **GPU**: NVIDIA GPU with 8GB+ VRAM (16GB recommended)
-- **CUDA**: 11.8+ (for GPU acceleration)
+- **GPU**: NVIDIA RTX 5070Ti with 16GB VRAM (testing)
+- **CUDA**: 13.0
 
 ## Quick Start
 
