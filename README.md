@@ -1,4 +1,4 @@
-# BEVFormer++ Training Pipeline
+# BEVFormer++
 
 A modular Bird's-Eye View (BEV) perception system that integrates multi-view camera images for 3D object detection. The system uses an enhanced BEVFormer architecture with Memory Bank and Motion-Compensated ConvRNN for temporal aggregation.
 
