@@ -67,6 +67,8 @@ Thumbs.db
 
 # Project specific - exclude from repo
 Master_Project_Proposal.pdf
+Project_Proposal.md
+.kiro/
 
 # Keep these files explicitly
 !.gitignore
@@ -75,4 +77,3 @@ Master_Project_Proposal.pdf
 !pyproject.toml
 !main.ipynb
 !train.py
-!Project_Proposal.md
