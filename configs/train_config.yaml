@@ -1,0 +1,45 @@
+# Training Configuration for BEV Fusion System
+# Inherits from base_config.yaml and overrides specific training parameters
+
+# Import base configuration
+base: "base_config.yaml"
+
+# Training-specific overrides
+training:
+  batch_size: 4
+  num_epochs: 50
+  learning_rate: 0.0002
+  gradient_clip_norm: 35.0
+  
+  # Data augmentation
+  augmentation:
+    random_flip: true
+    random_rotation: true
+    rotation_range: [-0.78539816, 0.78539816]  # ±45 degrees in radians
+    random_scale: true
+    scale_range: [0.95, 1.05]
+    
+  # Checkpoint settings
+  checkpoint_interval: 5
+  save_best_only: true
+  monitor_metric: "NDS"
+  
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 10
+    min_delta: 0.001
+
+# Dataset splits
+dataset:
+  train_split: "train"
+  val_split: "val"
+  shuffle: true
+  
+# Hardware for training
+hardware:
+  device: "cuda"
+  num_workers: 8
+  pin_memory: true
+  mixed_precision: true
+  gradient_accumulation_steps: 1

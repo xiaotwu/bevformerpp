@@ -1,0 +1,78 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter checkpoints (but keep notebooks)
+.ipynb_checkpoints/
+
+# PyTorch checkpoints
+*.pth
+*.pt
+*.ckpt
+
+# Data files (large, download separately)
+data/
+*.tgz
+*.tar.gz
+*.zip
+
+# Outputs and generated files
+checkpoints/
+outputs/
+runs/
+logs/
+*.log
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.hypothesis/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Project specific - exclude from repo
+Master_Project_Proposal.pdf
+
+# Keep these files explicitly
+!.gitignore
+!README.md
+!LICENSE
+!pyproject.toml
+!main.ipynb
+!train.py
+!Project_Proposal.md

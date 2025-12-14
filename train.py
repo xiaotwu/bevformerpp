@@ -4,7 +4,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import os
 import time
-from modules.dataset import NuScenesDataset, CarlaDataset
+from modules.nuscenes_dataset import NuScenesDataset
 from modules.bevformer import EnhancedBEVFormer
 from modules.head import BEVHead, DetectionLoss
 
@@ -22,31 +22,20 @@ def train():
     
     # 2. Data
     # Load Full NuScenes Dataset
-    if os.path.exists(NUSCENES_ROOT):
-        print(f"Loading NuScenes Dataset from {NUSCENES_ROOT}...")
-        full_dataset = NuScenesDataset(version='v1.0-mini', dataroot=NUSCENES_ROOT)
-        
-        # Split: 70% Train, 15% Val, 15% Test
-        total_size = len(full_dataset)
-        train_size = int(0.7 * total_size)
-        val_size = int(0.15 * total_size)
-        test_size = total_size - train_size - val_size
-        
-        print(f"Splitting dataset: Train={train_size}, Val={val_size}, Test={test_size}")
-        train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
-            full_dataset, [train_size, val_size, test_size], 
-            generator=torch.Generator().manual_seed(42)
-        )
-    else:
-        print(f"WARNING: NuScenes dataset not found at {NUSCENES_ROOT}. Using Dummy Data.")
-        full_dataset = CarlaDataset(root_dir='data', dummy_mode=True)
-        train_size = 70
-        val_size = 15
-        test_size = 15
-        train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
-            full_dataset, [train_size, val_size, test_size],
-            generator=torch.Generator().manual_seed(42)
-        )
+    print(f"Loading NuScenes Dataset from {NUSCENES_ROOT}...")
+    full_dataset = NuScenesDataset(dataroot=NUSCENES_ROOT, version='v1.0-mini')
+    
+    # Split: 70% Train, 15% Val, 15% Test
+    total_size = len(full_dataset)
+    train_size = int(0.7 * total_size)
+    val_size = int(0.15 * total_size)
+    test_size = total_size - train_size - val_size
+    
+    print(f"Splitting dataset: Train={train_size}, Val={val_size}, Test={test_size}")
+    train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
+        full_dataset, [train_size, val_size, test_size], 
+        generator=torch.Generator().manual_seed(42)
+    )
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)

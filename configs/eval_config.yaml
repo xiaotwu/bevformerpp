@@ -1,0 +1,46 @@
+# Evaluation Configuration for BEV Fusion System
+# Inherits from base_config.yaml and overrides specific evaluation parameters
+
+# Import base configuration
+base: "base_config.yaml"
+
+# Evaluation-specific overrides
+evaluation:
+  batch_size: 1
+  checkpoint_path: "./checkpoints/best_model.pth"
+  
+  # Metrics to compute
+  metrics:
+    - "AP"
+    - "ATE"  # Average Translation Error
+    - "ASE"  # Average Scale Error
+    - "AOE"  # Average Orientation Error
+    - "NDS"  # nuScenes Detection Score
+    
+  # Per-class evaluation
+  per_class_metrics: true
+  
+  # Visualization settings
+  visualization:
+    enabled: true
+    save_images: true
+    num_samples: 50
+    show_ground_truth: true
+    show_predictions: true
+    
+  # Output settings
+  save_predictions: true
+  output_format: "json"
+  output_dir: "./outputs/evaluation"
+
+# Dataset for evaluation
+dataset:
+  split: "val"
+  shuffle: false
+  
+# Hardware for evaluation
+hardware:
+  device: "cuda"
+  num_workers: 4
+  pin_memory: true
+  mixed_precision: true

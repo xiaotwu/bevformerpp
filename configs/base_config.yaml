@@ -1,0 +1,116 @@
+# Base Configuration for BEV Fusion System
+
+# BEV Grid Configuration
+bev_grid:
+  x_min: -51.2  # meters
+  x_max: 51.2
+  y_min: -51.2
+  y_max: 51.2
+  z_min: -5.0
+  z_max: 3.0
+  resolution: 0.2  # meters per pixel
+  # Computed: H = W = (102.4 / 0.2) = 512, but we'll use 200 for efficiency
+
+# Model Architecture
+model:
+  # LiDAR BEV Encoder
+  lidar:
+    pillar_channels: 64
+    num_features: 64  # C1
+    max_points_per_pillar: 32
+    max_pillars: 12000
+    
+  # Camera BEV Encoder
+  camera:
+    backbone: "resnet50"
+    pretrained: true
+    num_features: 256  # C2
+    num_attention_heads: 8
+    num_attention_layers: 6
+    dropout: 0.1
+    
+  # Spatial Fusion
+  fusion:
+    num_features: 256  # C3
+    fusion_type: "cross_attention"  # or "concat_conv"
+    num_attention_heads: 8
+    
+  # Temporal Aggregation
+  temporal:
+    sequence_length: 5  # T
+    use_transformer: true
+    use_convgru: true
+    hidden_channels: 128
+    num_attention_heads: 8
+    dropout: 0.1
+    
+  # Detection Head
+  detection:
+    num_classes: 10  # nuScenes classes
+    shared_conv_channels: 256
+    bbox_params: 7  # (x, y, z, w, l, h, yaw)
+    nms_iou_threshold: 0.5
+    score_threshold: 0.3
+
+# Dataset Configuration
+dataset:
+  name: "nuscenes"
+  version: "v1.0-mini"
+  data_root: "./data"
+  num_cameras: 6
+  camera_names:
+    - "CAM_FRONT"
+    - "CAM_FRONT_RIGHT"
+    - "CAM_FRONT_LEFT"
+    - "CAM_BACK"
+    - "CAM_BACK_LEFT"
+    - "CAM_BACK_RIGHT"
+  image_size: [900, 1600]  # H, W
+  point_cloud_range: [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
+  
+# Training Configuration
+training:
+  batch_size: 2
+  num_epochs: 20
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  gradient_clip_norm: 35.0
+  
+  # Optimizer
+  optimizer: "AdamW"
+  betas: [0.9, 0.999]
+  
+  # Learning Rate Scheduler
+  lr_scheduler: "CosineAnnealingLR"
+  lr_warmup_epochs: 2
+  
+  # Loss Weights
+  loss_weights:
+    classification: 1.0
+    regression: 2.0
+    
+  # Checkpointing
+  checkpoint_interval: 1  # epochs
+  save_dir: "./checkpoints"
+  resume_from: null
+  
+  # Logging
+  log_interval: 10  # iterations
+  tensorboard_dir: "./runs"
+
+# Evaluation Configuration
+evaluation:
+  batch_size: 1
+  metrics:
+    - "AP"  # Average Precision
+    - "NDS"  # nuScenes Detection Score
+  visualization: true
+  save_predictions: true
+  output_dir: "./outputs"
+
+# Hardware Configuration
+hardware:
+  device: "cuda"  # or "cpu"
+  num_workers: 4
+  pin_memory: true
+  mixed_precision: true  # FP16 training

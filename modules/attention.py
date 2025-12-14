@@ -1,7 +1,13 @@
+"""
+Attention modules for BEV Fusion System.
+Includes spatial cross-attention, temporal self-attention, and temporal gating.
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from typing import Optional
 
 class SpatialCrossAttention(nn.Module):
     def __init__(self, embed_dim=256, num_heads=8, num_points=4, num_levels=1):
@@ -101,28 +107,194 @@ class SpatialCrossAttention(nn.Module):
         return self.output_proj(output)
 
 class TemporalSelfAttention(nn.Module):
-    def __init__(self, embed_dim=256, num_heads=8):
+    """
+    Multi-head self-attention across temporal sequence.
+    Applies attention between current BEV features and aligned history.
+    
+    This is a simplified version that uses standard multi-head attention.
+    For efficiency, deformable attention can be used in production.
+    """
+    
+    def __init__(self, embed_dim: int = 256, num_heads: int = 8, dropout: float = 0.1):
+        """
+        Initialize temporal self-attention module.
+        
+        Args:
+            embed_dim: Embedding dimension (feature channels)
+            num_heads: Number of attention heads
+            dropout: Dropout rate for attention weights
+        """
         super().__init__()
         self.embed_dim = embed_dim
-        self.self_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
+        self.num_heads = num_heads
         
-    def forward(self, query, history_bev, query_pos, history_pos):
+        # Multi-head self-attention
+        self.self_attn = nn.MultiheadAttention(
+            embed_dim, 
+            num_heads, 
+            dropout=dropout,
+            batch_first=True
+        )
+        
+        # Layer normalization
+        self.norm = nn.LayerNorm(embed_dim)
+        
+        # Dropout
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, query: torch.Tensor, key_value: torch.Tensor, 
+                query_pos: Optional[torch.Tensor] = None,
+                key_pos: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        query: (B, L, C)
-        history_bev: (B, L, C)
+        Apply temporal self-attention.
+        
+        Args:
+            query: Current BEV features, shape (B, L, C) where L = H*W
+            key_value: Aligned history BEV features, shape (B, T*L, C) where T is sequence length
+            query_pos: Optional positional encoding for query, shape (B, L, C)
+            key_pos: Optional positional encoding for key, shape (B, T*L, C)
+        
+        Returns:
+            Attended features, shape (B, L, C)
         """
-        # In standard BEVFormer, this aligns history to current using ego-motion
-        # and then performs attention.
-        # Here we assume history_bev is already aligned (warped).
-        
-        # Concatenate query and history for key/value? 
-        # Or just use history as Key/Value?
-        # Standard BEVFormer uses history as KV, query as Q.
-        
-        # Add positional embeddings
+        # Add positional embeddings if provided
         q = query + query_pos if query_pos is not None else query
-        k = history_bev + history_pos if history_pos is not None else history_bev
-        v = history_bev
+        k = key_value + key_pos if key_pos is not None else key_value
+        v = key_value
         
-        output, _ = self.self_attn(q, k, v)
+        # Apply self-attention
+        # query attends to key_value (history)
+        attn_output, attn_weights = self.self_attn(q, k, v)
+        
+        # Apply dropout and residual connection
+        output = query + self.dropout(attn_output)
+        
+        # Layer normalization
+        output = self.norm(output)
+        
+        return output
+
+
+
+class TemporalGating(nn.Module):
+    """
+    Compute confidence weights for temporal features.
+    Uses feature similarity to adaptively weight past frames.
+    
+    The gating mechanism helps the model decide how much to trust
+    each historical frame based on its similarity to the current frame.
+    """
+    
+    def __init__(self, embed_dim: int = 256):
+        """
+        Initialize temporal gating module.
+        
+        Args:
+            embed_dim: Feature dimension
+        """
+        super().__init__()
+        self.embed_dim = embed_dim
+        
+        # Convolutional layers to compute gating weights
+        # Takes concatenated current and aligned features
+        self.gate_conv = nn.Sequential(
+            nn.Conv2d(embed_dim * 2, embed_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(embed_dim),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(embed_dim, 1, kernel_size=1),
+            nn.Sigmoid()  # Output in [0, 1]
+        )
+    
+    def forward(self, current_features: torch.Tensor, 
+                aligned_features: torch.Tensor) -> torch.Tensor:
+        """
+        Compute confidence weights based on feature similarity.
+        
+        Args:
+            current_features: Current BEV features, shape (B, C, H, W)
+            aligned_features: Aligned historical features, shape (B, C, H, W)
+        
+        Returns:
+            Gating weights in [0, 1], shape (B, 1, H, W)
+        """
+        # Concatenate current and aligned features
+        concat_features = torch.cat([current_features, aligned_features], dim=1)
+        
+        # Compute gating weights
+        gate_weights = self.gate_conv(concat_features)  # (B, 1, H, W)
+        
+        return gate_weights
+    
+    def apply_gating(self, features: torch.Tensor, 
+                     gate_weights: torch.Tensor) -> torch.Tensor:
+        """
+        Apply gating weights to features.
+        
+        Args:
+            features: Features to gate, shape (B, C, H, W)
+            gate_weights: Gating weights, shape (B, 1, H, W)
+        
+        Returns:
+            Gated features, shape (B, C, H, W)
+        """
+        return features * gate_weights
+
+
+
+class ResidualUpdate(nn.Module):
+    """
+    Combine current and temporally aggregated features using residual connection.
+    Allows the model to preserve current frame information while incorporating temporal context.
+    """
+    
+    def __init__(self, embed_dim: int = 256, use_projection: bool = False):
+        """
+        Initialize residual update module.
+        
+        Args:
+            embed_dim: Feature dimension
+            use_projection: Whether to use a learned projection for the residual
+        """
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.use_projection = use_projection
+        
+        if use_projection:
+            # Learnable projection for the temporal features
+            self.projection = nn.Sequential(
+                nn.Conv2d(embed_dim, embed_dim, kernel_size=1),
+                nn.BatchNorm2d(embed_dim)
+            )
+        
+        # Layer normalization
+        self.norm = nn.LayerNorm([embed_dim])
+    
+    def forward(self, current_features: torch.Tensor, 
+                temporal_features: torch.Tensor,
+                alpha: float = 0.5) -> torch.Tensor:
+        """
+        Combine current and temporal features with residual connection.
+        
+        Args:
+            current_features: Current BEV features, shape (B, C, H, W)
+            temporal_features: Temporally aggregated features, shape (B, C, H, W)
+            alpha: Weighting factor for temporal features (default: 0.5)
+        
+        Returns:
+            Combined features, shape (B, C, H, W)
+        """
+        # Apply projection if enabled
+        if self.use_projection:
+            temporal_features = self.projection(temporal_features)
+        
+        # Weighted combination
+        output = current_features + alpha * temporal_features
+        
+        # Apply layer normalization (need to permute for LayerNorm)
+        # LayerNorm expects (B, H, W, C)
+        B, C, H, W = output.shape
+        output = output.permute(0, 2, 3, 1)  # (B, H, W, C)
+        output = self.norm(output)
+        output = output.permute(0, 3, 1, 2)  # (B, C, H, W)
+        
         return output
