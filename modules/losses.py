@@ -15,13 +15,13 @@ class FocalLoss(nn.Module):
     Based on "Focal Loss for Dense Object Detection" (Lin et al., 2017).
     """
     
-    def __init__(self, alpha: float = 2.0, beta: float = 4.0):
+    def __init__(self, alpha: float = 2.0, beta: float = 6.0):
         """
         Initialize focal loss.
         
         Args:
             alpha: Focusing parameter (default: 2.0)
-            beta: Modulating parameter for negative samples (default: 4.0)
+            beta: Modulating parameter for negative samples (default: 6.0, increased to suppress off-center activations)
         """
         super().__init__()
         self.alpha = alpha
@@ -128,12 +128,15 @@ class SmoothL1Loss(nn.Module):
             return loss
 
 
-class DetectionLoss(nn.Module):
+class CombinedDetectionLoss(nn.Module):
     """
     Combined loss for 3D object detection.
     Includes classification loss and regression loss with configurable weights.
-    
+
     Implements Requirements 8.2 from the design document.
+
+    Note: This is a lower-level implementation. For the full detection loss
+    with CenterNet-style Gaussian heatmap targets, see modules.head.DetectionLoss.
     """
     
     def __init__(
@@ -141,7 +144,7 @@ class DetectionLoss(nn.Module):
         cls_weight: float = 1.0,
         reg_weight: float = 1.0,
         focal_alpha: float = 2.0,
-        focal_beta: float = 4.0,
+        focal_beta: float = 6.0,
         smooth_l1_beta: float = 1.0
     ):
         """
@@ -151,7 +154,7 @@ class DetectionLoss(nn.Module):
             cls_weight: Weight for classification loss
             reg_weight: Weight for regression loss
             focal_alpha: Focal loss alpha parameter
-            focal_beta: Focal loss beta parameter
+            focal_beta: Focal loss beta parameter (increased to suppress off-center activations)
             smooth_l1_beta: Smooth L1 loss beta parameter
         """
         super().__init__()
@@ -249,10 +252,16 @@ class GaussianFocalLoss(nn.Module):
     Gaussian Focal Loss for heatmap-based detection (CenterNet style).
     Legacy class for backward compatibility.
     """
-    
-    def __init__(self, alpha: float = 2.0, beta: float = 4.0):
+
+    def __init__(self, alpha: float = 2.0, beta: float = 6.0):
         super().__init__()
         self.focal_loss = FocalLoss(alpha=alpha, beta=beta)
-    
+
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         return self.focal_loss(pred, target)
+
+
+# DEPRECATED: Do not use this alias. Use modules.head.DetectionLoss for training.
+# This alias is kept only for backward compatibility with legacy code.
+# New code must explicitly use: from modules.head import DetectionLoss
+DetectionLossLegacy = CombinedDetectionLoss

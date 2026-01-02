@@ -1,0 +1,47 @@
+# Debug Configuration - minimal settings for quick testing
+# Usage: python train.py --config configs/debug.yaml --max_steps 1
+
+# BEV Grid Configuration
+bev_grid:
+  x_min: -51.2
+  x_max: 51.2
+  y_min: -51.2
+  y_max: 51.2
+  z_min: -5.0
+  z_max: 3.0
+  resolution: 0.512  # Coarser resolution for faster debug (200x200 grid)
+
+# Model Architecture
+model:
+  lidar:
+    num_features: 64
+  camera:
+    num_features: 256
+  fusion:
+    type: "bidirectional_cross_attn"  # Cross-attention with token downsampling (FIX 3)
+    dim: 256
+    num_heads: 8
+    token_downsample: 4  # FIX 3: Downsample 200x200 -> 50x50 before attention
+  temporal:
+    type: mc_convrnn  # FIX 2: Proposal default for fusion
+    sequence_length: 2  # Shorter sequence for debug
+    use_mc_convrnn: true
+
+# Dataset Configuration
+dataset:
+  name: "nuscenes"
+  version: "v1.0-mini"
+  data_root: "data"
+
+# Training Configuration - minimal for debugging
+training:
+  batch_size: 1
+  num_epochs: 1
+  learning_rate: 0.0001
+
+# Hardware Configuration
+hardware:
+  device: "cuda"
+  num_workers: 0
+  mixed_precision: false
+

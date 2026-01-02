@@ -247,15 +247,34 @@ class ConvGRUCell(nn.Module):
 class MCConvRNN(nn.Module):
     """
     Motion-Compensated Convolutional RNN for temporal aggregation.
-    
+
     Implements the complete 5-step process:
     1. Ego-motion warping
     2. Dynamic residual motion field estimation
     3. Visibility gating
     4. ConvGRU fusion
     5. Output projection
-    
+
     Implements Requirements 5.1-5.5 from the design document.
+
+    BPTT (Backpropagation Through Time) Behavior:
+    ---------------------------------------------
+    This module uses "truncated BPTT" by design:
+    - The hidden state should be detached between sequences/scenes
+    - For per-frame training, gradients flow through the current frame only
+    - The caller is responsible for detaching hidden states at scene boundaries
+
+    For full temporal gradient flow across multiple frames:
+    - Pass the hidden state without detaching between forward calls
+    - Be aware this increases memory usage linearly with sequence length
+    - Consider gradient checkpointing for long sequences
+
+    Example usage with truncated BPTT:
+        hidden = None
+        for sample in scene:
+            output, hidden = mc_convrnn(features, prev_features, hidden, ego_motion)
+            # hidden is reused across frames within a scene
+        hidden = None  # Reset at scene boundary
     """
     
     def __init__(
@@ -263,21 +282,36 @@ class MCConvRNN(nn.Module):
         input_channels: int = 256,
         hidden_channels: int = 128,
         motion_hidden_channels: int = 128,
-        kernel_size: int = 3
+        kernel_size: int = 3,
+        bev_range: Tuple[float, float, float, float] = (-51.2, 51.2, -51.2, 51.2),
+        # Ablation study flags
+        disable_warping: bool = False,
+        disable_motion_field: bool = False,
+        disable_visibility: bool = False
     ):
         """
         Initialize MC-ConvRNN module.
-        
+
         Args:
             input_channels: Number of input feature channels
             hidden_channels: Number of hidden state channels for ConvGRU
             motion_hidden_channels: Hidden channels for motion field estimator
             kernel_size: Kernel size for ConvGRU convolutions
+            bev_range: BEV range (x_min, x_max, y_min, y_max) in meters for warping
+            disable_warping: Ablation - disable ego-motion warping
+            disable_motion_field: Ablation - disable dynamic motion field estimation
+            disable_visibility: Ablation - disable visibility gating
         """
         super().__init__()
-        
+
         self.input_channels = input_channels
         self.hidden_channels = hidden_channels
+        self.bev_range = bev_range
+        
+        # Ablation flags
+        self.disable_warping = disable_warping
+        self.disable_motion_field = disable_motion_field
+        self.disable_visibility = disable_visibility
         
         # Motion field estimator
         self.motion_estimator = MotionFieldEstimator(
@@ -337,28 +371,35 @@ class MCConvRNN(nn.Module):
             output = self.output_proj(torch.cat([current_features, new_hidden], dim=1))
             return output, new_hidden
         
-        # Step 1: Ego-motion warping
-        if ego_motion is not None:
-            warped_features = align_bev_features(prev_features, ego_motion)
-            warped_hidden = align_bev_features(prev_hidden, ego_motion)
+        # Step 1: Ego-motion warping (can be disabled for ablation)
+        if ego_motion is not None and not self.disable_warping:
+            warped_features = align_bev_features(prev_features, ego_motion, bev_range=self.bev_range)
+            warped_hidden = align_bev_features(prev_hidden, ego_motion, bev_range=self.bev_range)
         else:
             warped_features = prev_features
             warped_hidden = prev_hidden
         
-        # Step 2: Dynamic residual motion field
-        motion_field = self.motion_estimator(current_features, warped_features)
-        aligned_features = warp_with_flow(warped_features, motion_field)
-        
-        # Step 3: Visibility gating
-        if ego_motion is not None:
-            visibility_mask = compute_visibility_mask(ego_motion, H, W)
+        # Step 2: Dynamic residual motion field (can be disabled for ablation)
+        if not self.disable_motion_field:
+            motion_field = self.motion_estimator(current_features, warped_features)
+            aligned_features = warp_with_flow(warped_features, motion_field)
         else:
-            visibility_mask = torch.ones(B, 1, H, W, device=device)
+            aligned_features = warped_features
         
-        gated_features = self.visibility_gating(aligned_features, visibility_mask)
+        # Step 3: Visibility gating (can be disabled for ablation)
+        if not self.disable_visibility and ego_motion is not None:
+            visibility_mask = compute_visibility_mask(ego_motion, H, W, bev_range=self.bev_range)
+            gated_features = self.visibility_gating(aligned_features, visibility_mask)
+        else:
+            gated_features = aligned_features
         
         # Step 4: ConvGRU fusion
-        new_hidden = self.convgru_cell(current_features, warped_hidden)
+        # Fuse gated_features (motion-compensated history) with current_features
+        # This creates an enhanced input that combines current observations with aligned history
+        fused_input = current_features + gated_features  # Element-wise fusion
+        
+        # Use fused input with warped hidden state
+        new_hidden = self.convgru_cell(fused_input, warped_hidden)
         
         # Step 5: Output projection
         output = self.output_proj(torch.cat([current_features, new_hidden], dim=1))

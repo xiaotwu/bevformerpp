@@ -17,15 +17,29 @@ from .utils import align_bev_features
 class TemporalAggregationModule(nn.Module):
     """
     Complete temporal aggregation module using transformer-based attention.
-    
+
     This module:
     1. Stores past BEV features in a memory bank
     2. Aligns past features to current frame using ego-motion
     3. Applies temporal self-attention across the sequence
     4. Computes confidence weights via temporal gating
     5. Combines current and temporal features with residual connection
-    
+
     Implements Requirements 4.1-4.5 from the design document.
+
+    BPTT (Backpropagation Through Time) Behavior:
+    ---------------------------------------------
+    By default (enable_bptt=False), this module uses "truncated BPTT":
+    - Historical features are detached when stored in memory bank
+    - Gradients only flow through the current frame's computation
+    - This is memory-efficient and stable for training
+
+    Set enable_bptt=True for full temporal gradient flow, which is useful for:
+    - End-to-end training of prediction/forecasting tasks
+    - Learning temporal dynamics that require multi-frame gradients
+
+    Note: With enable_bptt=True, consider using gradient checkpointing and
+    limiting max_history to prevent memory issues.
     """
     
     def __init__(
@@ -36,11 +50,13 @@ class TemporalAggregationModule(nn.Module):
         dropout: float = 0.1,
         use_gating: bool = True,
         use_projection: bool = False,
-        temporal_alpha: float = 0.5
+        temporal_alpha: float = 0.5,
+        bev_range: Tuple[float, float, float, float] = (-51.2, 51.2, -51.2, 51.2),
+        enable_bptt: bool = False
     ):
         """
         Initialize temporal aggregation module.
-        
+
         Args:
             embed_dim: Feature dimension (C)
             num_heads: Number of attention heads
@@ -49,17 +65,22 @@ class TemporalAggregationModule(nn.Module):
             use_gating: Whether to use temporal gating
             use_projection: Whether to use learned projection in residual update
             temporal_alpha: Weighting factor for temporal features
+            bev_range: BEV range (x_min, x_max, y_min, y_max) in meters for warping
+            enable_bptt: Whether to allow gradients through stored features.
+                        Default False (truncated BPTT) for memory efficiency.
+                        Set True for full backpropagation through time.
         """
         super().__init__()
-        
+
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.max_history = max_history
         self.use_gating = use_gating
         self.temporal_alpha = temporal_alpha
+        self.bev_range = bev_range
         
         # Memory bank for storing past features
-        self.memory_bank = MemoryBank(max_length=max_history)
+        self.memory_bank = MemoryBank(max_length=max_history, enable_bptt=enable_bptt)
         
         # Temporal self-attention
         self.temporal_attention = TemporalSelfAttention(
@@ -110,13 +131,46 @@ class TemporalAggregationModule(nn.Module):
         
         # Get history from memory bank
         history_features, history_transforms = self.memory_bank.get_sequence()
-        
+
+        # TEMPORAL FIX: Compose transforms to align each historical frame to the CURRENT frame.
+        #
+        # Memory bank structure at time t (before push):
+        #   history_features = [feat_0, feat_1, ..., feat_{t-1}]
+        #   history_transforms = [T_{0→1}, T_{1→2}, ..., T_{t-2→t-1}]
+        #
+        # The current call provides ego_transform = T_{t-1→t}
+        #
+        # To align frame i to frame t, we need:
+        #   T_{i→t} = T_{i→i+1} @ T_{i+1→i+2} @ ... @ T_{t-1→t}
+        #
+        # We must include ego_transform in the composition!
+        #
+        # Build cumulative transforms from each historical frame to current frame.
+        cumulative_transforms = []
+
+        # All transforms including the current one
+        all_transforms = list(history_transforms)
+        if ego_transform is not None:
+            all_transforms.append(ego_transform)
+
+        if len(all_transforms) > 0 and len(history_features) > 0:
+            # Start with identity and compose backwards from newest to oldest
+            accum = torch.eye(4, device=device, dtype=current_bev.dtype)
+            accum = accum.unsqueeze(0).expand(B, -1, -1).clone()
+
+            # Build transforms from newest to oldest
+            # For frame i, we need T_{i→t} = T_i @ T_{i+1} @ ... @ T_{t-1→t}
+            for i in range(len(all_transforms) - 1, -1, -1):
+                # Compose: accum = T_i @ accum (transform from frame i to current frame t)
+                accum = torch.bmm(all_transforms[i], accum)
+                cumulative_transforms.insert(0, accum.clone())
+
         # Align historical features to current frame
         aligned_history = []
-        for i, hist_feat in enumerate(history_features[:-1]):  # Exclude current frame
-            if ego_transform is not None and i < len(history_transforms):
-                # Align using ego-motion
-                aligned_feat = align_bev_features(hist_feat, history_transforms[i])
+        for i, hist_feat in enumerate(history_features):  # All historical features
+            if i < len(cumulative_transforms):
+                # Use cumulative transform from frame i to current frame t
+                aligned_feat = align_bev_features(hist_feat, cumulative_transforms[i], bev_range=self.bev_range)
             else:
                 # No alignment if transform not available
                 aligned_feat = hist_feat

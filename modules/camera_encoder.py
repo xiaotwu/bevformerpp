@@ -18,23 +18,25 @@ from .neck import FPN
 from .attention import SpatialCrossAttention
 
 
-def project_bev_to_image(bev_coords, intrinsics, extrinsics, bev_config):
+def project_bev_to_image(bev_coords, intrinsics, extrinsics, bev_config, img_size=(224, 400)):
     """
     Project BEV grid coordinates to image space.
-    
+
     Args:
         bev_coords: (H, W, 3) - 3D coordinates of BEV grid points in ego frame
         intrinsics: (B, N_cam, 3, 3) - Camera intrinsic matrices
         extrinsics: (B, N_cam, 4, 4) - Camera extrinsic matrices (ego to camera)
         bev_config: dict with 'x_min', 'x_max', 'y_min', 'y_max', 'z_ref'
-    
+        img_size: (H, W) - Image size that intrinsics are calibrated for
+
     Returns:
-        reference_points: (B, N_cam, H*W, 2) - Normalized image coordinates [0, 1]
+        reference_points: (B, N_cam, H*W, 2) - Normalized image coordinates [-1, 1]
         valid_mask: (B, N_cam, H*W) - Boolean mask for valid projections
     """
     B, N_cam = intrinsics.shape[:2]
     H, W = bev_coords.shape[:2]
     device = intrinsics.device
+    img_h, img_w = img_size
     
     # Flatten BEV coordinates: (H*W, 3)
     bev_coords_flat = bev_coords.reshape(-1, 3)  # (H*W, 3)
@@ -72,12 +74,8 @@ def project_bev_to_image(bev_coords, intrinsics, extrinsics, bev_config):
             
             # Normalize by depth
             img_coords = img_coords_homo[:2, :] / (img_coords_homo[2:3, :] + 1e-6)  # (2, H*W)
-            
-            # Normalize to [0, 1] range (assuming image size is known)
-            # For grid_sample, we need [-1, 1] range
-            # Let's assume image size is 900x1600 (nuScenes default)
-            img_h, img_w = 900, 1600
-            
+
+            # Use img_h, img_w from function parameter (extracted from img_size at function start)
             # Convert to [-1, 1] for grid_sample
             img_coords_norm = torch.stack([
                 2.0 * img_coords[0, :] / img_w - 1.0,  # u
@@ -160,8 +158,8 @@ class CameraBEVEncoder(nn.Module):
         num_layers=6,
         bev_x_range=(-51.2, 51.2),
         bev_y_range=(-51.2, 51.2),
-        img_h=900,
-        img_w=1600
+        img_h=224,
+        img_w=400
     ):
         """
         Args:
@@ -173,8 +171,8 @@ class CameraBEVEncoder(nn.Module):
             num_layers: Number of cross-attention layers
             bev_x_range: (x_min, x_max) in meters
             bev_y_range: (y_min, y_max) in meters
-            img_h: Input image height
-            img_w: Input image width
+            img_h: Input image height (must match intrinsics calibration size)
+            img_w: Input image width (must match intrinsics calibration size)
         """
         super().__init__()
         
@@ -254,25 +252,34 @@ class CameraBEVEncoder(nn.Module):
     def _create_bev_coords(self):
         """
         Create 3D coordinates for BEV grid points in ego frame.
-        
+
+        Uses pixel-center semantics to match the target generator:
+        - Pixel i covers physical range [min + i*res, min + (i+1)*res)
+        - Pixel center is at min + (i + 0.5) * res
+
         Returns:
-            bev_coords: (H, W, 3) - [x, y, z] coordinates
+            bev_coords: (H, W, 3) - [x, y, z] coordinates at pixel centers
         """
         x_min, x_max = self.bev_config['x_min'], self.bev_config['x_max']
         y_min, y_max = self.bev_config['y_min'], self.bev_config['y_max']
         z_ref = self.bev_config['z_ref']
-        
-        # Create grid
-        x = torch.linspace(x_min, x_max, self.bev_w)
-        y = torch.linspace(y_min, y_max, self.bev_h)
-        
+
+        # Compute resolution (meters per pixel)
+        x_res = (x_max - x_min) / self.bev_w
+        y_res = (y_max - y_min) / self.bev_h
+
+        # Create grid at pixel centers (not endpoints)
+        # This matches target generator: pixel 100 -> x = -51.2 + 100.5*0.512 = 0.0
+        x = torch.linspace(x_min + x_res / 2, x_max - x_res / 2, self.bev_w)
+        y = torch.linspace(y_min + y_res / 2, y_max - y_res / 2, self.bev_h)
+
         # Note: In BEV, typically x is forward, y is left
         # Grid indexing: [H, W] corresponds to [y, x]
         yy, xx = torch.meshgrid(y, x, indexing='ij')
         zz = torch.full_like(xx, z_ref)
-        
+
         bev_coords = torch.stack([xx, yy, zz], dim=-1)  # (H, W, 3)
-        
+
         return bev_coords
     
     def forward(self, images, intrinsics, extrinsics):
@@ -307,11 +314,13 @@ class CameraBEVEncoder(nn.Module):
         # 2. Project BEV grid to image space
         # reference_points: (B, N_cam, H_bev*W_bev, 2)
         # valid_mask: (B, N_cam, H_bev*W_bev)
+        # Use self.img_h/self.img_w which should match the intrinsics calibration size
         reference_points, valid_mask = project_bev_to_image(
             self.bev_coords,
             intrinsics,
             extrinsics,
-            self.bev_config
+            self.bev_config,
+            img_size=(self.img_h, self.img_w)
         )
         
         # 3. Initialize BEV queries
@@ -354,21 +363,23 @@ class CameraBEVEncoder(nn.Module):
 
 
 # Standalone projection utilities for testing
-def project_3d_to_2d(points_3d, intrinsics, extrinsics):
+def project_3d_to_2d(points_3d, intrinsics, extrinsics, img_size=(900, 1600)):
     """
     Project 3D points in ego frame to 2D image coordinates.
-    
+
     Args:
         points_3d: (N, 3) - 3D points in ego frame [x, y, z]
         intrinsics: (3, 3) - Camera intrinsic matrix
         extrinsics: (4, 4) - Camera extrinsic matrix (ego to camera)
-    
+        img_size: (H, W) - Image size for bounds checking
+
     Returns:
         points_2d: (N, 2) - 2D image coordinates [u, v] in pixels
         valid_mask: (N,) - Boolean mask for valid projections
     """
     N = points_3d.shape[0]
     device = points_3d.device
+    img_h, img_w = img_size
     
     # Add homogeneous coordinate
     points_3d_homo = torch.cat([
@@ -396,10 +407,10 @@ def project_3d_to_2d(points_3d, intrinsics, extrinsics):
     # Normalize by depth
     points_2d = img_coords_homo[:2, :] / (img_coords_homo[2:3, :] + 1e-6)  # (2, N)
     points_2d = points_2d.T  # (N, 2)
-    
-    # Check if within image bounds (assuming 900x1600)
-    valid_u = (points_2d[:, 0] >= 0) & (points_2d[:, 0] < 1600)
-    valid_v = (points_2d[:, 1] >= 0) & (points_2d[:, 1] < 900)
+
+    # Check if within image bounds using provided img_size
+    valid_u = (points_2d[:, 0] >= 0) & (points_2d[:, 0] < img_w)
+    valid_v = (points_2d[:, 1] >= 0) & (points_2d[:, 1] < img_h)
     valid_mask = valid_u & valid_v & valid_depth
-    
+
     return points_2d, valid_mask

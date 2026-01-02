@@ -29,20 +29,33 @@ model:
     num_attention_layers: 6
     dropout: 0.1
     
-  # Spatial Fusion
+  # Spatial Fusion (PROPOSAL ALIGNMENT)
   fusion:
-    num_features: 256  # C3
-    fusion_type: "cross_attention"  # or "concat_conv"
-    num_attention_heads: 8
+    type: "bidirectional_cross_attn"  # PROPOSAL DEFAULT: alignment-aware cross-attention
+    # Alternative types: "cross_attention" (legacy), "local_attention", "convolutional"
+    dim: 256  # C3: fused feature channels
+    num_heads: 8
+    use_bidirectional: true  # Enable Camera<->LiDAR bidirectional attention
+    use_gate: true  # Enable learned gating for residual combination
+    pos_encoding: "sinusoidal_2d"  # 2D sinusoidal positional encoding
+    dropout: 0.0
     
-  # Temporal Aggregation
+  # Temporal Aggregation (PROPOSAL ALIGNMENT: MC-ConvRNN)
   temporal:
     sequence_length: 5  # T
-    use_transformer: true
-    use_convgru: true
+    use_transformer: false  # Optional transformer-based aggregation
+    use_mc_convrnn: true  # PROPOSAL DEFAULT: Motion-Compensated ConvRNN
     hidden_channels: 128
-    num_attention_heads: 8
-    dropout: 0.1
+    # MC-ConvRNN specific settings
+    mc_convrnn:
+      enable_warp: true  # Ego-motion warping (Mechanism 1)
+      enable_residual: true  # Residual motion refinement (Mechanism 2)
+      enable_visibility_gate: true  # Visibility gating (Mechanism 3)
+      motion_hidden_channels: 128
+    # Transformer specific settings (if use_transformer: true)
+    transformer:
+      num_attention_heads: 8
+      dropout: 0.1
     
   # Detection Head
   detection:
@@ -114,3 +127,11 @@ hardware:
   num_workers: 4
   pin_memory: true
   mixed_precision: true  # FP16 training
+
+# Runtime Configuration (for profiling and optimization)
+runtime:
+  amp: true  # Automatic mixed precision
+  cudnn_benchmark: true  # Enable cuDNN auto-tuning
+  torch_compile: false  # PyTorch 2.0 compilation (experimental)
+  profile: false  # Enable profiling hooks
+  profile_output_dir: "./outputs/profile"

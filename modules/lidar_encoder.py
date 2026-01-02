@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
 
 from modules.data_structures import BEVGridConfig
 
@@ -357,44 +357,126 @@ class LiDARBEVEncoder(nn.Module):
         # 2D CNN backbone
         self.backbone = BackboneCNN(in_channels=64, out_channels=out_channels)
     
-    def forward(self, points_batch: List[np.ndarray]) -> torch.Tensor:
+    def forward(self, points_batch: Union[List[np.ndarray], torch.Tensor],
+                mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Forward pass for batch of point clouds.
-        
+
         Args:
-            points_batch: List of (N_i, 4) numpy arrays [x, y, z, intensity]
-        
+            points_batch: Either:
+                - List of (N_i, 4) numpy arrays [x, y, z, intensity]
+                - torch.Tensor of shape (B, N, 4) with padding
+            mask: Optional boolean mask (B, N) where True = valid point, False = padding
+                  Required when points_batch is a padded tensor.
+
         Returns:
             bev_features: (B, C1, H, W) tensor
         """
-        batch_size = len(points_batch)
         device = next(self.parameters()).device
-        
+
+        # Route to appropriate method based on input type
+        if isinstance(points_batch, list):
+            return self.forward_list(points_batch)
+        else:
+            return self.forward_padded(points_batch, mask)
+
+    def forward_list(self, points_list: List[np.ndarray]) -> torch.Tensor:
+        """
+        Forward pass for list of point clouds (no padding).
+
+        Args:
+            points_list: List of (N_i, 4) numpy arrays [x, y, z, intensity]
+
+        Returns:
+            bev_features: (B, C1, H, W) tensor
+        """
+        device = next(self.parameters()).device
+        batch_size = len(points_list)
+
         # Process each point cloud in batch
         bev_features_list = []
-        
-        for points in points_batch:
+
+        for points in points_list:
             # Pillarization
             pillars, pillar_coords, num_points = self.pillarization(points)
-            
+
             # Convert to tensors
             pillars_t = torch.from_numpy(pillars).to(device)
             pillar_coords_t = torch.from_numpy(pillar_coords).to(device)
             num_points_t = torch.from_numpy(num_points).to(device)
-            
+
             # Feature extraction
-            pillar_features = self.pillar_feature_net(pillars_t, pillar_coords_t, 
+            pillar_features = self.pillar_feature_net(pillars_t, pillar_coords_t,
                                                      num_points_t, self.config)
-            
+
             # Scatter to BEV
             bev = self.scatter(pillar_features, pillar_coords_t, batch_size=1)
-            
+
             bev_features_list.append(bev)
-        
+
         # Stack batch
         bev_features = torch.cat(bev_features_list, dim=0)  # (B, 64, H, W)
-        
+
         # Apply backbone
         bev_features = self.backbone(bev_features)  # (B, C1, H, W)
-        
+
         return bev_features
+
+    def forward_padded(self, points: torch.Tensor,
+                       mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Forward pass for padded point cloud tensor with explicit mask.
+
+        CRITICAL FIX: This method properly handles padded LiDAR inputs by using
+        the mask to filter out padding before pillarization. Padded points
+        (typically zeros) are NEVER included in pillar statistics.
+
+        Uses normalize_lidar_points_and_mask() for robust shape handling and
+        validation. This prevents the common bug where mask has shape (B, 4)
+        due to incorrect dimension reduction.
+
+        Args:
+            points: (B, N, 4) or (B, T, N, 4) tensor of point clouds with padding
+                    If 4D, temporal dimension is handled by the normalizer.
+            mask: (B, N) or (B, T, N) boolean tensor where True = valid point, False = padding
+                  If None, will infer mask from non-zero points.
+
+        Returns:
+            bev_features: (B, C1, H, W) tensor
+
+        Raises:
+            ValueError: If mask shape doesn't match points (catches the (B, 4) bug)
+        """
+        from .utils.core import normalize_lidar_points_and_mask, validate_lidar_mask_shape
+
+        device = next(self.parameters()).device
+
+        # Use the authoritative normalization function
+        # This handles:
+        # - 4D -> 3D conversion (temporal squeezing)
+        # - Mask inference with CORRECT dimension reduction (dim=-1, not dim=1)
+        # - Mask shape validation with helpful error messages
+        points_3d, mask_2d = normalize_lidar_points_and_mask(
+            points, mask, squeeze_temporal=True
+        )
+
+        batch_size = points_3d.shape[0]
+        num_points = points_3d.shape[1]
+
+        # Double-check mask shape (belt and suspenders)
+        # This will catch bugs like (B, 4) masks with a clear error message
+        validate_lidar_mask_shape(
+            mask_2d, batch_size, num_points,
+            context="LiDARBEVEncoder.forward_padded"
+        )
+
+        # Convert to list of valid points per sample
+        points_list = []
+        for b in range(batch_size):
+            pts = points_3d[b].cpu().numpy()  # (N, 4)
+            valid_mask = mask_2d[b].cpu().numpy()  # (N,) bool
+            pts_valid = pts[valid_mask][:, :4]  # Keep only x, y, z, intensity
+            points_list.append(pts_valid)
+
+        # Use the list-based forward
+        return self.forward_list(points_list)
